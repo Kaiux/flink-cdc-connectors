@@ -20,8 +20,14 @@ package com.alibaba.ververica.cdc.connectors.mysql;
 
 import com.alibaba.ververica.cdc.debezium.DebeziumDeserializationSchema;
 import com.alibaba.ververica.cdc.debezium.DebeziumSourceFunction;
+import com.alibaba.ververica.cdc.debezium.internal.DebeziumState;
+import com.alibaba.ververica.cdc.debezium.internal.FlinkOffsetBackingStore;
 import io.debezium.connector.mysql.MySqlConnector;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Properties;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -51,6 +57,9 @@ public class MySQLSource {
 		private Properties dbzProperties;
 		private DebeziumDeserializationSchema<T> deserializer;
 
+		private String sourceOffsetFile;
+		private Integer sourceOffsetPosition;
+
 		public Builder<T> hostname(String hostname) {
 			this.hostname = hostname;
 			return this;
@@ -61,6 +70,22 @@ public class MySQLSource {
 		 */
 		public Builder<T> port(int port) {
 			this.port = port;
+			return this;
+		}
+
+		/**
+		 * Sets the MySql source offset file name.
+		 */
+		public Builder<T> sourceOffsetFile(String sourceOffsetFile) {
+			this.sourceOffsetFile = sourceOffsetFile;
+			return this;
+		}
+
+		/**
+		 * Sets the MySql source offset position.
+		 */
+		public Builder<T> sourceOffsetPosition(Integer sourceOffsetPosition) {
+			this.sourceOffsetPosition = sourceOffsetPosition;
 			return this;
 		}
 
@@ -164,6 +189,31 @@ public class MySQLSource {
 			}
 			if (serverTimeZone != null) {
 				props.setProperty("database.serverTimezone", serverTimeZone);
+			}
+
+			if (sourceOffsetFile != null && sourceOffsetPosition != null) {
+				// if binlog offset is specified, 'snapshot.mode=schema_only_recovery' must be configured
+				props.setProperty("snapshot.mode", "schema_only_recovery");
+
+				DebeziumState debeziumState = new DebeziumState();
+				Map<String, String> sourcePartition = new HashMap<>();
+				sourcePartition.put("server", props.getProperty("database.server.name"));
+				debeziumState.setSourcePartition(sourcePartition);
+
+				Map<String, Object> sourceOffset = new HashMap<>();
+				sourceOffset.put("file", sourceOffsetFile);
+				sourceOffset.put("pos", sourceOffsetPosition);
+				debeziumState.setSourceOffset(sourceOffset);
+
+				try {
+					ObjectMapper objectMapper = new ObjectMapper();
+					String offsetJson = objectMapper.writeValueAsString(debeziumState);
+					// if the task is restored from savepoint, it will be overwritten by restoredOffsetState
+					props.setProperty(FlinkOffsetBackingStore.OFFSET_STATE_VALUE, offsetJson);
+					props.setProperty("database.history.exists", "false");
+				} catch (IOException e) {
+					throw new RuntimeException("Can't serialize debezium offset state from Object: " + debeziumState, e);
+				}
 			}
 
 			if (dbzProperties != null) {
